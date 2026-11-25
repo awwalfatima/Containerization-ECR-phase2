@@ -11,6 +11,9 @@ jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
 
+    env:
+      IMAGE_TAG: ${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -29,7 +32,6 @@ jobs:
       - name: Build and push backend
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          IMAGE_TAG: ${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           docker build -t $ECR_REGISTRY/xahra/zeetafin:backend-$IMAGE_TAG ./Zeetafin-ERP/Backend
           docker push $ECR_REGISTRY/xahra/zeetafin:backend-$IMAGE_TAG
@@ -37,15 +39,11 @@ jobs:
       - name: Build and push frontend
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          IMAGE_TAG: ${{ github.sha }}
         run: |
           docker build -t $ECR_REGISTRY/xahra/zeetafin:frontend-$IMAGE_TAG ./Zeetafin-ERP/frontend
           docker push $ECR_REGISTRY/xahra/zeetafin:frontend-$IMAGE_TAG
 
       - name: Deploy to EC2 using SSM
-        env:
-          IMAGE_TAG: ${{ github.sha }}
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         run: |
           DEPLOY_SCRIPT=$(cat <<'REMOTE_SCRIPT'
           set -e
@@ -60,7 +58,7 @@ jobs:
             chmod 600 .env
           fi
 
-         . .env
+          . .env
 
           docker network create zeetafin-network 2>/dev/null || true
           docker network connect zeetafin-network nginx 2>/dev/null || true
@@ -70,7 +68,9 @@ jobs:
           docker pull 865480028999.dkr.ecr.eu-west-1.amazonaws.com/xahra/zeetafin:backend-__IMAGE_TAG__
           docker pull 865480028999.dkr.ecr.eu-west-1.amazonaws.com/xahra/zeetafin:frontend-__IMAGE_TAG__
 
-          if ! docker ps -a --format '{{.Names}}' | grep -qx zeetafin-db; then
+          if docker ps -a --format '{{.Names}}' | grep -qx zeetafin-db; then
+            docker start zeetafin-db || true
+          else
             docker run -d --name zeetafin-db --restart unless-stopped --network zeetafin-network \
               -e POSTGRES_USER="$DB_USERNAME" \
               -e POSTGRES_PASSWORD="$DB_PASSWORD" \
@@ -79,12 +79,19 @@ jobs:
               postgres:16-alpine
           fi
 
+          DB_READY=0
           for i in $(seq 1 30); do
             if docker exec zeetafin-db pg_isready -U "$DB_USERNAME" -d "$DB_NAME"; then
+              DB_READY=1
               break
             fi
             sleep 5
           done
+
+          if [ "$DB_READY" -ne 1 ]; then
+            echo "PostgreSQL did not become ready."
+            exit 1
+          fi
 
           docker rm -f zeetafin-backend 2>/dev/null || true
           docker run -d --name zeetafin-backend --restart unless-stopped --network zeetafin-network \
