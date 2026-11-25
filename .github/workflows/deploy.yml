@@ -58,7 +58,7 @@ jobs:
             chmod 600 .env
           fi
 
-          . .env
+          . /opt/zeetafin/.env
 
           docker network create zeetafin-network 2>/dev/null || true
           docker network connect zeetafin-network nginx 2>/dev/null || true
